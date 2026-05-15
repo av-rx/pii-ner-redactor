@@ -44,6 +44,22 @@ python evaluate.py --regex-only  # regex patterns only, no model needed
 
 The script reports per-type recall, overall recall, and an over-redaction ratio against the 1,000-line ground truth (`pii-generate-testset/pii_test_ground_truth.json`).
 
+**Results (full run):**
+
+| Type | Recall |
+|------|--------|
+| NAME | 100.0% |
+| ORG | 100.0% |
+| EMAIL | 100.0% |
+| PHONE | 73.5% |
+| ADDRESS | 100.0% |
+| SSN | 100.0% |
+| CREDIT_CARD | 100.0% |
+| PASSPORT | 70.9% |
+| **Overall** | **93.0%** |
+
+The corpus is synthetic, so structured types (EMAIL, SSN, CREDIT_CARD, ADDRESS) are evaluated against formats the regex patterns were explicitly written to handle — recall on those reflects pattern coverage rather than generalisation. PHONE and PASSPORT fall short because the generator produces some format variants outside the regex scope. For real-world documents, results will vary.
+
 ## Test Set
 
 `pii-generate-testset/` contains a script that generates a synthetic evaluation corpus:
