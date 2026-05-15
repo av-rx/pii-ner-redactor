@@ -8,7 +8,6 @@ from tkinter import ttk, filedialog, messagebox
 LOCAL_CACHE = os.path.join(os.getcwd(), "hf_cache")
 os.makedirs(LOCAL_CACHE, exist_ok=True)
 os.environ["HF_HOME"] = LOCAL_CACHE
-os.environ["TRANSFORMERS_CACHE"] = LOCAL_CACHE
 
 EMAIL_PATTERN = r'\b[\w\.-]+@[\w\.-]+\.\w+\b'
 PHONE_PATTERN = r'\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}\b'
@@ -35,7 +34,7 @@ def load_ner_model_in_background(model_name="dbmdz/bert-large-cased-finetuned-co
         from transformers import pipeline  # local import inside thread
 
         loader_queue.put(("status", f"Loading model: {model_name}"))
-        ner_pipeline = pipeline("ner", model=model_name, tokenizer=model_name, grouped_entities=True, device=-1)  # -1 = CPU
+        ner_pipeline = pipeline("ner", model=model_name, tokenizer=model_name, aggregation_strategy="simple", device=-1)  # -1 = CPU
         loader_queue.put(("done", "Model loaded."))
     except Exception as exc:
         ner_pipeline = None
