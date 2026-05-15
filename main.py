@@ -8,6 +8,8 @@ from tkinter import ttk, filedialog, messagebox
 LOCAL_CACHE = os.path.join(os.getcwd(), "hf_cache")
 os.makedirs(LOCAL_CACHE, exist_ok=True)
 os.environ["HF_HOME"] = LOCAL_CACHE
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"          # suppress TF C++ / oneDNN info logs
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"  # suppress Windows symlinks warning
 
 EMAIL_PATTERN = r'\b[\w\.-]+@[\w\.-]+\.\w+\b'
 PHONE_PATTERN = r'\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}\b'
@@ -31,7 +33,11 @@ def load_ner_model_in_background(model_name="dbmdz/bert-large-cased-finetuned-co
     try:
         loader_queue.put(("status", "Importing transformers..."))
         # Import inside thread to avoid blocking main thread at startup
-        from transformers import pipeline  # local import inside thread
+        import logging
+        logging.getLogger("tensorflow").setLevel(logging.ERROR)
+        from transformers import pipeline
+        import transformers
+        transformers.logging.set_verbosity_error()  # suppress "some weights not used" etc.
 
         loader_queue.put(("status", f"Loading model: {model_name}"))
         ner_pipeline = pipeline("ner", model=model_name, tokenizer=model_name, aggregation_strategy="simple", device=-1)  # -1 = CPU
