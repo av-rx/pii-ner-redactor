@@ -33,6 +33,17 @@ The model (~1.3 GB) is downloaded automatically on first run into a local `hf_ca
 
 Redacted spans are labelled by type, e.g. `[REDACTED_PER]`, `[REDACTED_EMAIL]`, `[REDACTED_SSN]`.
 
+## Evaluation
+
+Run `evaluate.py` to measure recall across all 8 entity types on the synthetic corpus:
+
+```bash
+python evaluate.py               # loads BERT model + regex (~2 min)
+python evaluate.py --regex-only  # regex patterns only, no model needed
+```
+
+The script reports per-type recall, overall recall, and an over-redaction ratio against the 1,000-line ground truth (`pii-generate-testset/pii_test_ground_truth.json`).
+
 ## Test Set
 
 `pii-generate-testset/` contains a script that generates a synthetic evaluation corpus:
