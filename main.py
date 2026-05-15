@@ -1,0 +1,291 @@
+import os
+import re
+import threading
+import queue
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+# --------------------------
+# Project-local Hugging Face cache
+# --------------------------
+LOCAL_CACHE = os.path.join(os.getcwd(), "hf_cache")
+os.makedirs(LOCAL_CACHE, exist_ok=True)
+os.environ["HF_HOME"] = LOCAL_CACHE
+os.environ["TRANSFORMERS_CACHE"] = LOCAL_CACHE
+
+# --------------------------
+# Regex PII patterns
+# --------------------------
+EMAIL_PATTERN = r'\b[\w\.-]+@[\w\.-]+\.\w+\b'
+PHONE_PATTERN = r'\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}\b'
+SSN_PATTERN = r'\b\d{3}-\d{2}-\d{4}\b'
+ADDRESS_PATTERN = (
+    r'\b(?:\d{1,5}\s+)?'
+    r'(?:[A-Za-z0-9\.\-\s]{1,50})'
+    r'(?:\s(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Lane|Ln|Drive|Dr|Court|Ct|Circle|Cir|Way|Wy|Square|Sq|Place|Pl|Terrace|Ter))'
+    r'(?:[\s,]*(?:Apt|Unit|Suite|#)\s?\w+)?'
+)
+CREDIT_CARD_PATTERN = r'\b(?:\d[ -]*?){13,16}\b'
+PASSPORT_PATTERN = r'\b[A-PR-WY][1-9]\d\s?\d{4}[1-9]\b'
+
+# --------------------------
+# Globals for ML pipeline
+# --------------------------
+# We'll put the loaded pipeline here once ready.
+ner_pipeline = None
+
+# A queue to receive status messages from the loader thread.
+loader_queue = queue.Queue()
+
+
+# --------------------------
+# Function: background model loader
+# --------------------------
+def load_ner_model_in_background(model_name="dbmdz/bert-large-cased-finetuned-conll03-english"):
+    """
+    Runs in a separate thread. Downloads/initializes the NER pipeline and puts status updates into loader_queue.
+    """
+    global ner_pipeline
+    try:
+        loader_queue.put(("status", "Importing transformers..."))
+        # Import inside thread to avoid blocking main thread at startup
+        from transformers import pipeline  # local import inside thread
+
+        loader_queue.put(("status", f"Loading model: {model_name}"))
+        # This will download the model into LOCAL_CACHE (if necessary) and may take time.
+        ner_pipeline = pipeline("ner", model=model_name, tokenizer=model_name, grouped_entities=True, device=-1)
+        loader_queue.put(("done", "Model loaded."))
+    except Exception as exc:
+        ner_pipeline = None
+        loader_queue.put(("error", f"Model failed to load: {exc}"))
+
+
+# --------------------------
+# Redaction logic (ML + regex)
+# --------------------------
+def redact_text(text: str) -> str:
+    """
+    Redact PII using ner_pipeline if available (ML) + fallback regex redactions.
+    Keep offset bookkeeping when ML replacement is applied so subsequent replacements remain correct.
+    """
+    redacted_text = text
+    offset = 0
+
+    # ML-based redaction if available
+    if ner_pipeline:
+        try:
+            entities = ner_pipeline(text)
+            # entities are usually in order of appearance; we still handle offsets
+            for ent in entities:
+                start = ent.get("start")
+                end = ent.get("end")
+                if start is None or end is None:
+                    continue
+                start += offset
+                end += offset
+                label = ent.get("entity_group", "ENTITY")
+                redaction = f"[REDACTED_{label}]"
+                redacted_text = redacted_text[:start] + redaction + redacted_text[end:]
+                offset += len(redaction) - (end - start)
+        except Exception:
+            # If ML fails unexpectedly, proceed with regex-only
+            pass
+
+    # Regex-based redactions (applied over the current redacted_text)
+    patterns = [
+        (EMAIL_PATTERN, "[REDACTED_EMAIL]"),
+        (PHONE_PATTERN, "[REDACTED_PHONE]"),
+        (ADDRESS_PATTERN, "[REDACTED_ADDRESS]"),
+        (SSN_PATTERN, "[REDACTED_SSN]"),
+        (CREDIT_CARD_PATTERN, "[REDACTED_CREDIT_CARD]"),
+        (PASSPORT_PATTERN, "[REDACTED_PASSPORT]")
+    ]
+    for pat, repl in patterns:
+        redacted_text = re.sub(pat, repl, redacted_text, flags=re.IGNORECASE)
+
+    return redacted_text
+
+
+# --------------------------
+# GUI Application
+# --------------------------
+class PiiRedactorGUI(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("PII NER Redactor")
+        self.geometry("1100x650")
+        self.minsize(900, 500)
+
+        self._create_widgets()
+        self._start_model_loader()  # start background loading immediately
+        self.after(200, self._poll_loader_queue)  # poll for model load updates
+
+    def _create_widgets(self):
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        # Paned window for side-by-side
+        self.paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        self.paned.pack(fill=tk.BOTH, expand=True)
+
+        # Left: original
+        frame_left = ttk.Labelframe(self.paned, text="Original Text")
+        frame_left.pack(fill=tk.BOTH, expand=True)
+        self.text_original = tk.Text(frame_left, wrap=tk.WORD)
+        self.text_original.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        scroll_l = ttk.Scrollbar(frame_left, orient=tk.VERTICAL, command=self.text_original.yview)
+        self.text_original.configure(yscrollcommand=scroll_l.set)
+        scroll_l.pack(side=tk.RIGHT, fill=tk.Y)
+        self.paned.add(frame_left, weight=1)
+
+        # Right: redacted
+        frame_right = ttk.Labelframe(self.paned, text="Redacted Text")
+        frame_right.pack(fill=tk.BOTH, expand=True)
+        self.text_redacted = tk.Text(frame_right, wrap=tk.WORD, fg="darkred")
+        self.text_redacted.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        scroll_r = ttk.Scrollbar(frame_right, orient=tk.VERTICAL, command=self.text_redacted.yview)
+        self.text_redacted.configure(yscrollcommand=scroll_r.set)
+        scroll_r.pack(side=tk.RIGHT, fill=tk.Y)
+        self.paned.add(frame_right, weight=1)
+
+        # Bottom controls
+        controls = ttk.Frame(self)
+        controls.pack(fill=tk.X, padx=8, pady=8)
+
+        self.load_btn = ttk.Button(controls, text="Load .TXT", command=self._on_load_file)
+        self.load_btn.pack(side=tk.LEFT, padx=6)
+
+        self.redact_btn = ttk.Button(controls, text="Redact", command=self._on_redact)
+        self.redact_btn.pack(side=tk.LEFT, padx=6)
+
+        self.save_btn = ttk.Button(controls, text="Save Redacted", command=self._on_save_file)
+        self.save_btn.pack(side=tk.LEFT, padx=6)
+
+        # Model status indicator on the right of controls
+        self.status_var = tk.StringVar(value="Model: Loading...")
+        self.status_label = ttk.Label(controls, textvariable=self.status_var)
+        self.status_label.pack(side=tk.RIGHT, padx=8)
+
+        # disable redact/save initially until user loads or writes text
+        # redact may be used even when model not ready - we won't block, but we show status
+        # nothing to disable here; buttons are enabled.
+
+    # --------------------------
+    # Model loader management
+    # --------------------------
+    def _start_model_loader(self):
+        """
+        Start the background thread to load the accurate NER model.
+        """
+        # spawn thread to load model (will populate ner_pipeline and put messages into loader_queue)
+        threading.Thread(target=load_ner_model_in_background, daemon=True).start()
+        # Show a small modal dialog so user knows model is loading (non-blocking mainloop)
+        self._show_loading_dialog()
+
+    def _show_loading_dialog(self):
+        """
+        Create a small non-blocking modal-like dialog that displays loader status and a cancel option.
+        The dialog does not prevent GUI interaction but acts as a status window.
+        """
+        self.loading_win = tk.Toplevel(self)
+        self.loading_win.title("Loading NER Model")
+        self.loading_win.geometry("360x130")
+        self.loading_win.transient(self)
+        # don't make it fully modal (so main GUI remains responsive). Keep topmost
+        self.loading_win.attributes("-topmost", True)
+
+        lbl = ttk.Label(self.loading_win, text="Model is loading in background.\nYou can use the app; ML will activate when ready.", wraplength=320)
+        lbl.pack(padx=12, pady=(12, 6))
+
+        self.loading_status_var = tk.StringVar(value="Starting...")
+        status_lbl = ttk.Label(self.loading_win, textvariable=self.loading_status_var, foreground="blue")
+        status_lbl.pack(padx=12, pady=6)
+
+        # Close button lets user dismiss the status window - model will continue loading
+        ttk.Button(self.loading_win, text="Hide", command=self.loading_win.withdraw).pack(pady=(0, 8))
+
+    def _poll_loader_queue(self):
+        """
+        Poll the loader_queue for status updates from the background thread.
+        """
+        try:
+            while True:
+                kind, msg = loader_queue.get_nowait()
+                if kind == "status":
+                    self.loading_status_var.set(msg)
+                    self.status_var.set(f"Model: {msg}")
+                elif kind == "done":
+                    self.loading_status_var.set("Model ready.")
+                    self.status_var.set("Model: Ready")
+                    # auto-close the loading window after a short delay
+                    try:
+                        self.loading_win.after(600, self.loading_win.destroy)
+                    except Exception:
+                        pass
+                elif kind == "error":
+                    self.loading_status_var.set("Model failed to load.")
+                    self.status_var.set("Model: Failed")
+                    messagebox.showerror("Model Error", msg)
+                    try:
+                        self.loading_win.after(600, self.loading_win.destroy)
+                    except Exception:
+                        pass
+                loader_queue.task_done()
+        except queue.Empty:
+            pass
+        # keep polling
+        self.after(200, self._poll_loader_queue)
+
+    # --------------------------
+    # Button callbacks
+    # --------------------------
+    def _on_load_file(self):
+        path = filedialog.askopenfilename(title="Open Text File", filetypes=[("Text Files", "*.txt")])
+        if not path:
+            return
+        if not path.lower().endswith(".txt"):
+            messagebox.showerror("Invalid File", "Only .txt files are supported.")
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = f.read()
+            self.text_original.delete(1.0, tk.END)
+            self.text_original.insert(tk.END, data)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load file:\n{e}")
+
+    def _on_redact(self):
+        original = self.text_original.get(1.0, tk.END).rstrip()
+        if not original:
+            messagebox.showwarning("No Input", "Please enter or load text to redact.")
+            return
+        # perform redaction (ML used if ready)
+        redacted = redact_text(original)
+        self.text_redacted.delete(1.0, tk.END)
+        self.text_redacted.insert(tk.END, redacted)
+
+    def _on_save_file(self):
+        redacted = self.text_redacted.get(1.0, tk.END).rstrip()
+        if not redacted:
+            messagebox.showwarning("Nothing to Save", "Redacted text is empty. Redact something first.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text Files", "*.txt")], title="Save Redacted Text")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(redacted)
+            messagebox.showinfo("Saved", f"Redacted text saved to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save file:\n{e}")
+
+
+# --------------------------
+# Run the app
+# --------------------------
+if __name__ == "__main__":
+    app = PiiRedactorGUI()
+    app.mainloop()
