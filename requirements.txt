@@ -1,2 +1,5 @@
-transformers>=4.30
+transformers>=4.30,<5
 torch>=2.0
+
+# tests only
+pytest>=8
